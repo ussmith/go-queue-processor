@@ -5,6 +5,8 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+
+	stomp "github.com/go-stomp/stomp"
 )
 
 const (
@@ -21,7 +23,7 @@ const (
 
 //MessageProcessor is handles messages specific to a business case
 type MessageProcessor interface {
-	HandleMessage(msg []byte) error
+	ProcessMessages(connection *stomp.Subscription, stopFlag chan bool) error
 }
 
 //MessageHandler is a harness for reactive jms processor
@@ -42,7 +44,10 @@ var recheckPeriod int
 var cores int
 
 type messageHandler struct {
-	messageProcessor *MessageProcessor
+	controlChannelList []chan bool
+	messageProcessor   MessageProcessor
+	connection         *stomp.Conn
+	subscription       *stomp.Subscription
 }
 
 func init() {
@@ -78,7 +83,7 @@ func init() {
 	}
 }
 
-func (handler *messageHandler) SetProcessor(processor *MessageProcessor) {
+func (handler *messageHandler) SetProcessor(processor MessageProcessor) {
 	handler.messageProcessor = processor
 }
 
@@ -87,6 +92,31 @@ func (handler *messageHandler) Run() {
 
 	if err != nil {
 		//blow up
+	}
+
+	handler.connection, err = stomp.Dial("tcp", brokerURL)
+
+	if err != nil {
+		panic("Failed to create connection: " + err.Error())
+	}
+
+	handler.subscription, err = handler.connection.Subscribe(transportName, stomp.AckClient)
+
+	if err != nil {
+		panic("Failed to create subscription: " + err.Error())
+	}
+
+	//Create as many processors as there are cores
+	for i := 0; i < cores; i++ {
+		c := make(chan bool)
+		handler.controlChannelList[i] = c
+		go handler.messageProcessor.ProcessMessages(handler.subscription, c)
+	}
+}
+
+func (handler *messageHandler) Stop() {
+	for _, c := range handler.controlChannelList {
+		c <- false
 	}
 }
 
